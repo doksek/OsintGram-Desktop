@@ -37,7 +37,7 @@ namespace {
 
 rpl::producer<TextWithEntities> Text1() {
 	return rpl::single<TextWithEntities>({
-		.text = "Forkgram based on the Telegram Desktop." });
+		.text = "OsintGram, based on Forkgram and Telegram Desktop." });
 	return tr::lng_about_text1(
 		lt_api_link,
 		tr::lng_about_text1_api(tr::url(u"https://core.telegram.org/api"_q)),

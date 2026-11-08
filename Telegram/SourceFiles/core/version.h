@@ -9,7 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/const_string.h"
 
-constexpr auto AppNameF = "Forkgram Desktop"_cs;
+constexpr auto AppNameF = "OsintGram Desktop"_cs;
 
 #define TDESKTOP_REQUESTED_ALPHA_VERSION (0ULL)
 
@@ -20,9 +20,9 @@ constexpr auto AppNameF = "Forkgram Desktop"_cs;
 #endif // TDESKTOP_ALLOW_CLOSED_ALPHA
 
 // used in Updater.cpp and Setup.iss for Windows
-constexpr auto AppId = "{53F49750-6209-4FBF-9CA8-7A333C87D1ED}"_cs;
+constexpr auto AppId = "{A26F3397-FABD-4938-BFAA-390C6E06C552}"_cs;
 constexpr auto AppNameOld = "Telegram Win (Unofficial)"_cs;
-constexpr auto AppName = "Telegram Desktop"_cs;
+constexpr auto AppName = "OsintGram Desktop"_cs;
 constexpr auto AppFile = "Telegram"_cs;
 constexpr auto AppVersion = 7004001;
 constexpr auto AppVersionStr = "7.4.1";

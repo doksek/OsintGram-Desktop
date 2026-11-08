@@ -1497,7 +1497,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_fork_passkeys_button_local" = "Add Passkey (Local Only)";
 "lng_fork_passkeys_none_button_local" = "Create Passkey (Local Only)";
 "lng_fork_passkeys_intro_local" = "Log in using passkey (Local Only)";
-"lng_fork_passkeys_local_about" = "**Local Only** passkeys are created and stored by Forkgram itself, in the Secure Enclave or your login keychain. They are never synced to iCloud or to a password manager, so they work only on this computer.";
+"lng_fork_passkeys_local_about" = "**Local Only** passkeys are created and stored by OsintGram itself, in the Secure Enclave or your login keychain. They are never synced to iCloud or to a password manager, so they work only on this computer.";
 "lng_fork_passkeys_local_short" = "Your passkey stays on this Mac only and is never synced anywhere.";
 "lng_fork_passkeys_created" = "Passkey created and stored on this Mac.";
 "lng_fork_passkeys_create_error" = "Couldn't create a local passkey on this Mac.";

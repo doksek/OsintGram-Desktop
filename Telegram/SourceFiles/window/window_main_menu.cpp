@@ -390,7 +390,7 @@ MainMenu::MainMenu(
 
 	_telegram->setMarkedText(tr::link(
 		AppNameF.utf8(),
-		u"https://github.com/Forkgram/tdesktop"_q));
+		u"https://github.com/doksek/OsintGram-Desktop"_q));
 	_telegram->setLinksTrusted();
 	// The canary version is too long for the "Version {version}" form.
 	_version->setMarkedText(
