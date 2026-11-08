@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/ui_integration.h"
 
+#include "menu/menu_osint.h"
+
 #include "api/api_text_entities.h"
 #include "core/local_url_handlers.h"
 #include "core/file_utilities.h"
@@ -460,9 +462,10 @@ bool UiIntegration::handleUrlClick(
 		const QVariant &context) {
 	// Only our own token may be added below, never one that came with it,
 	// unless the url itself was given to us by the server for this login.
-	const auto url = context.value<ClickHandlerContext>().keepWebAuthTokens
-		? original
-		: UrlWithoutWebAuthTokens(original);
+	const auto url = Osint::CleanLink(
+		context.value<ClickHandlerContext>().keepWebAuthTokens
+			? original
+			: UrlWithoutWebAuthTokens(original));
 	const auto local = Core::TryConvertUrlToLocal(url);
 	if (Core::InternalPassportOrOAuthLink(local)) {
 		return true;

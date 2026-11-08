@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "apiwrap.h"
 
+#include "menu/menu_osint.h"
+
 #include "api/api_authorizations.h"
 #include "api/api_attached_stickers.h"
 #include "api/api_blocked_peers.h"
@@ -1477,6 +1479,9 @@ void ApiWrap::markContentsRead(
 			markedIds.push_back(MTP_int(item->id));
 		}
 	}
+	if (Osint::GhostNoRead()) {
+		return;
+	}
 	if (!markedIds.isEmpty()) {
 		request(MTPmessages_ReadMessageContents(
 			MTP_vector<MTPint>(markedIds)
@@ -1494,6 +1499,8 @@ void ApiWrap::markContentsRead(
 
 void ApiWrap::markContentsRead(not_null<HistoryItem*> item) {
 	if (!item->markContentsRead(true) || !item->isRegular()) {
+		return;
+	} else if (Osint::GhostNoRead()) {
 		return;
 	}
 	const auto ids = MTP_vector<MTPint>(1, MTP_int(item->id));

@@ -7,8 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "menu/menu_osint.h"
 
+#include "base/flat_map.h"
 #include "base/flat_set.h"
 #include "core/file_utilities.h"
+#include "lang/lang_keys.h"
+#include "settings.h"
 #include "data/data_channel.h"
 #include "data/data_document.h"
 #include "data/data_media_types.h"
@@ -75,6 +78,64 @@ namespace {
 		return false;
 	}
 	return (f.write(data) == data.size());
+}
+
+// ---------------------------------------------------------------------
+// Settings and ghost mode.
+
+[[nodiscard]] QString SettingsPath() {
+	return cWorkingDir() + u"tdata/osintgram.json"_q;
+}
+
+[[nodiscard]] Settings &MutableSettings() {
+	static auto result = [] {
+		auto f = QFile(SettingsPath());
+		return f.open(QIODevice::ReadOnly)
+			? Settings::Deserialize(f.readAll())
+			: Settings();
+	}();
+	return result;
+}
+
+[[nodiscard]] base::flat_map<FullMsgId, TimeId> &DeletedMessages() {
+	static auto result = base::flat_map<FullMsgId, TimeId>();
+	return result;
+}
+
+[[nodiscard]] QString JournalPath() {
+	return OutputFolder(u"ghost"_q) + u"/journal.jsonl"_q;
+}
+
+void AppendJournal(const QByteArray &lines) {
+	if (lines.isEmpty()) {
+		return;
+	}
+	auto f = QFile(JournalPath());
+	if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+		f.write(lines);
+	}
+}
+
+[[nodiscard]] std::vector<JournalRecord> ReadJournal(
+		int64 chatId,
+		int64 messageId = 0) {
+	auto f = QFile(JournalPath());
+	if (!f.open(QIODevice::ReadOnly)) {
+		return {};
+	}
+	auto all = JournalRecord::ParseLines(f.readAll());
+	auto result = std::vector<JournalRecord>();
+	for (auto &record : all) {
+		if (record.chatId == chatId
+			&& (!messageId || record.messageId == messageId)) {
+			result.push_back(std::move(record));
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] TimeId Now() {
+	return TimeId(QDateTime::currentSecsSinceEpoch());
 }
 
 [[nodiscard]] int64 BareId(not_null<PeerData*> peer) {
@@ -258,6 +319,24 @@ void AppendPassport(QString &out, PeerData *peer) {
 		}
 	}
 
+	const auto deleted = DeletedMessages().find(item->fullId());
+	if (deleted != DeletedMessages().end()) {
+		out += u"\n== STATUS ==\n"_q;
+		out += u"DELETED on the server, noticed at "_q
+			+ Utc(deleted->second)
+			+ '\n';
+	}
+	auto edits = QString();
+	for (const auto &record : ReadJournal(BareId(peer), item->id.bare)) {
+		if (record.kind == JournalRecord::Kind::Edited) {
+			edits += Utc(record.at) + u":\n  before: "_q + record.text
+				+ u"\n  after:  "_q + record.newText + '\n';
+		}
+	}
+	if (!edits.isEmpty()) {
+		out += u"\n== EDIT HISTORY ==\n"_q + edits;
+	}
+
 	const auto indicators = ItemIndicators(item);
 	if (!indicators.empty()) {
 		out += u"\n== INDICATORS ==\n"_q;
@@ -368,7 +447,7 @@ void ShowTextBox(
 		for (const auto &[name, callback] : buttons) {
 			box->addButton(rpl::single(name), callback);
 		}
-		box->addButton(rpl::single(u"Закрыть"_q), [=] {
+		box->addButton(rpl::single(L(u"Закрыть"_q, u"Close"_q)), [=] {
 			box->closeBox();
 		});
 	}));
@@ -399,10 +478,10 @@ void SaveEvidence(
 		+ u"Evidence file SHA-256: "_q + Sha256(body) + '\n';
 	const auto txtPath = folder + '/' + base + u".txt"_q;
 	if (WriteFile(jsonPath, body) && WriteFile(txtPath, txt.toUtf8())) {
-		controller->showToast(u"Сохранено: "_q + txtPath);
+		controller->showToast(L(u"Сохранено: "_q, u"Saved: "_q) + txtPath);
 		File::ShowInFolder(txtPath);
 	} else {
-		controller->showToast(u"Не удалось сохранить в "_q + folder);
+		controller->showToast(L(u"Не удалось сохранить в "_q, u"Could not save to "_q) + folder);
 	}
 }
 
@@ -430,9 +509,12 @@ struct ChatStats {
 			stats.first = date;
 		}
 		stats.last = std::max(stats.last, date);
-		const auto utc = QDateTime::fromSecsSinceEpoch(date).toUTC();
-		++stats.hours[utc.time().hour()];
-		++stats.weekdays[utc.date().dayOfWeek() - 1];
+		const auto local = QDateTime::fromSecsSinceEpoch(date);
+		const auto when = CurrentSettings().localTime
+			? local
+			: local.toUTC();
+		++stats.hours[when.time().hour()];
+		++stats.weekdays[when.date().dayOfWeek() - 1];
 		if (item->viewsCount() > 0) {
 			stats.viewsSum += item->viewsCount();
 			++stats.withViews;
@@ -464,17 +546,21 @@ struct ChatStats {
 		not_null<History*> history,
 		const ChatStats &stats) {
 	auto out = QString();
-	out += u"Чат: "_q + PeerLine(history->peer) + '\n';
-	out += u"Загружено сообщений: "_q
+	out += L(u"Чат: "_q, u"Chat: "_q) + PeerLine(history->peer) + '\n';
+	out += L(u"Загружено сообщений: "_q, u"Loaded messages: "_q)
 		+ QString::number(stats.messages)
 		+ '\n';
 	if (stats.messages) {
-		out += u"Период: "_q + Utc(stats.first) + u" — "_q
+		out += L(u"Период: "_q, u"Period: "_q) + Utc(stats.first) + u" — "_q
 			+ Utc(stats.last) + '\n';
 	}
-	out += u"(Прокрутите чат вверх, чтобы подгрузить больше истории.)\n"_q;
+	out += L(u"(Прокрутите чат вверх, чтобы подгрузить больше истории.)\n"_q, u"(Scroll the chat up to load more history.)\n"_q);
 
-	out += u"\n== Активность по часам (UTC) ==\n"_q;
+	const auto zone = CurrentSettings().localTime
+		? L(u"местное время"_q, u"local time"_q)
+		: u"UTC"_q;
+	out += L(u"\n== Активность по часам ("_q, u"\n== Activity by hour ("_q)
+		+ zone + u") ==\n"_q;
 	const auto maxHour = *std::max_element(
 		stats.hours.begin(),
 		stats.hours.end());
@@ -484,9 +570,10 @@ struct ChatStats {
 			.arg(Bar(stats.hours[h], maxHour))
 			.arg(stats.hours[h]);
 	}
-	out += u"\n== По дням недели (UTC) ==\n"_q;
+	out += L(u"\n== По дням недели ("_q, u"\n== By weekday ("_q)
+		+ zone + u") ==\n"_q;
 	const auto names = std::array<QString, 7>{
-		u"Пн"_q, u"Вт"_q, u"Ср"_q, u"Чт"_q, u"Пт"_q, u"Сб"_q, u"Вс"_q,
+		L(u"Пн"_q, u"Mon"_q), L(u"Вт"_q, u"Tue"_q), L(u"Ср"_q, u"Wed"_q), L(u"Чт"_q, u"Thu"_q), L(u"Пт"_q, u"Fri"_q), L(u"Сб"_q, u"Sat"_q), L(u"Вс"_q, u"Sun"_q),
 	};
 	const auto maxDay = *std::max_element(
 		stats.weekdays.begin(),
@@ -497,26 +584,26 @@ struct ChatStats {
 	}
 
 	if (stats.withViews > 0) {
-		out += u"\n== Просмотры ==\n"_q;
+		out += L(u"\n== Просмотры ==\n"_q, u"\n== Views ==\n"_q);
 		const auto average = stats.viewsSum / stats.withViews;
-		out += u"Средние: "_q + QString::number(average) + '\n';
-		out += u"Максимум: "_q + QString::number(stats.maxViews) + '\n';
+		out += L(u"Средние: "_q, u"Average: "_q) + QString::number(average) + '\n';
+		out += L(u"Максимум: "_q, u"Maximum: "_q) + QString::number(stats.maxViews) + '\n';
 		if (const auto channel = history->peer->asChannel()) {
 			const auto members = channel->membersCount();
 			if (members > 0) {
 				const auto percent = average * 100 / members;
-				out += u"Средние просмотры / подписчики: "_q
+				out += L(u"Средние просмотры / подписчики: "_q, u"Average views / subscribers: "_q)
 					+ QString::number(percent) + u"%"_q;
 				if (percent < 5) {
-					out += u" — очень низко, возможна накрутка подписчиков"_q;
+					out += L(u" — очень низко, возможна накрутка подписчиков"_q, u" — very low, subscribers may be fake"_q);
 				}
 				out += '\n';
 			}
 		}
 	}
 
-	out += u"\n== Источники пересылок ==\n"_q;
-	out += u"Пересланных сообщений: "_q
+	out += L(u"\n== Источники пересылок ==\n"_q, u"\n== Forward sources ==\n"_q);
+	out += L(u"Пересланных сообщений: "_q, u"Forwarded messages: "_q)
 		+ QString::number(stats.forwarded)
 		+ '\n';
 	auto sources = std::vector<std::pair<int, QString>>();
@@ -532,10 +619,10 @@ struct ChatStats {
 		out += QString::number(count) + u" × "_q + name + '\n';
 	}
 
-	out += u"\n== Индикаторы ==\n"_q;
-	out += u"Уникальных: "_q
+	out += L(u"\n== Индикаторы ==\n"_q, u"\n== Indicators ==\n"_q);
+	out += L(u"Уникальных: "_q, u"Unique: "_q)
 		+ QString::number(int(stats.indicators.size()))
-		+ u" (ссылки, @упоминания, e-mail, кошельки)\n"_q;
+		+ L(u" (ссылки, @упоминания, e-mail, кошельки)\n"_q, u" (links, @mentions, e-mails, wallets)\n"_q);
 	return out;
 }
 
@@ -557,7 +644,7 @@ void ExportIndicators(
 	}
 	if (counts.empty()) {
 		controller->showToast(
-			u"В загруженных сообщениях индикаторы не найдены"_q);
+			L(u"В загруженных сообщениях индикаторы не найдены"_q, u"No indicators in the loaded messages"_q));
 		return;
 	}
 	auto csv = QString(
@@ -582,10 +669,10 @@ void ExportIndicators(
 		+ u".csv"_q;
 	// UTF-8 BOM so that Excel shows Cyrillic correctly.
 	if (WriteFile(path, QByteArray("\xEF\xBB\xBF") + csv.toUtf8())) {
-		controller->showToast(u"Сохранено: "_q + path);
+		controller->showToast(L(u"Сохранено: "_q, u"Saved: "_q) + path);
 		File::ShowInFolder(path);
 	} else {
-		controller->showToast(u"Не удалось сохранить файл"_q);
+		controller->showToast(L(u"Не удалось сохранить файл"_q, u"Could not save the file"_q));
 	}
 }
 
@@ -594,7 +681,7 @@ void ExportArchive(
 		not_null<Window::SessionController*> controller) {
 	const auto items = LoadedItems(history);
 	if (items.empty()) {
-		controller->showToast(u"Нет загруженных сообщений"_q);
+		controller->showToast(L(u"Нет загруженных сообщений"_q, u"No loaded messages"_q));
 		return;
 	}
 	auto messages = QJsonArray();
@@ -613,7 +700,7 @@ void ExportArchive(
 			+ HtmlEscape(Utc(item->date())) + u" · "_q
 			+ HtmlEscape(PeerLine(item->from().get()));
 		if (const auto f = item->Get<HistoryMessageForwarded>()) {
-			html += u" · переслано из "_q + HtmlEscape(f->originalSender
+			html += L(u" · переслано из "_q, u" · forwarded from "_q) + HtmlEscape(f->originalSender
 				? PeerLine(f->originalSender)
 				: f->originalHiddenSenderInfo
 				? f->originalHiddenSenderInfo->name
@@ -635,9 +722,9 @@ void ExportArchive(
 	root.insert(u"messages"_q, messages);
 	const auto body = QJsonDocument(root).toJson(QJsonDocument::Indented);
 	const auto hash = Sha256(body);
-	html += u"<p class=\"h\">Создано OsintGram: "_q
+	html += L(u"<p class=\"h\">Создано OsintGram: "_q, u"<p class=\"h\">Created by OsintGram: "_q)
 		+ HtmlEscape(Utc(TimeId(QDateTime::currentSecsSinceEpoch())))
-		+ u". SHA-256 файла JSON: "_q + hash + u"</p></body></html>"_q;
+		+ L(u". SHA-256 файла JSON: "_q, u". SHA-256 of the JSON file: "_q) + hash + u"</p></body></html>"_q;
 
 	const auto base = u"archive_"_q
 		+ QString::number(BareId(history->peer))
@@ -652,10 +739,10 @@ void ExportArchive(
 	if (WriteFile(jsonPath, body)
 		&& WriteFile(htmlPath, html.toUtf8())
 		&& WriteFile(hashPath, hashes.toUtf8())) {
-		controller->showToast(u"Архив сохранён: "_q + htmlPath);
+		controller->showToast(L(u"Архив сохранён: "_q, u"Archive saved: "_q) + htmlPath);
 		File::ShowInFolder(htmlPath);
 	} else {
-		controller->showToast(u"Не удалось сохранить архив"_q);
+		controller->showToast(L(u"Не удалось сохранить архив"_q, u"Could not save the archive"_q));
 	}
 }
 
@@ -796,7 +883,7 @@ void ReverseSearch(
 	const auto image = LoadedPhotoImage(item);
 	if (image.isNull()) {
 		controller->showToast(
-			u"Сначала откройте фото, чтобы оно загрузилось"_q);
+			L(u"Сначала откройте фото, чтобы оно загрузилось"_q, u"Open the photo first so that it loads"_q));
 		return;
 	}
 	const auto path = OutputFolder(u"images"_q)
@@ -807,8 +894,10 @@ void ReverseSearch(
 	QGuiApplication::clipboard()->setImage(image);
 	QDesktopServices::openUrl(QUrl(url));
 	controller->showToast(
-		u"Фото скопировано: на открывшейся странице нажмите Ctrl+V. "_q
-		u"Файл также сохранён в Загрузки/OsintGram/images"_q);
+		L(u"Фото скопировано: на открывшейся странице нажмите Ctrl+V. "
+		u"Файл также сохранён в Загрузки/OsintGram/images"_q,
+		u"Photo copied: press Ctrl+V on the opened page. "
+		u"The file is also saved to Downloads/OsintGram/images"_q));
 }
 
 void ShowSimilarPhotos(
@@ -817,7 +906,7 @@ void ShowSimilarPhotos(
 	const auto image = LoadedPhotoImage(item);
 	if (image.isNull()) {
 		controller->showToast(
-			u"Сначала откройте фото, чтобы оно загрузилось"_q);
+			L(u"Сначала откройте фото, чтобы оно загрузилось"_q, u"Open the photo first so that it loads"_q));
 		return;
 	}
 	AddToIndex({ item });
@@ -838,13 +927,13 @@ void ShowSimilarPhotos(
 		return pair.first;
 	});
 	auto text = QString();
-	text += u"Фото в индексе: "_q
+	text += L(u"Фото в индексе: "_q, u"Photos in the index: "_q)
 		+ QString::number(int(index.size()))
-		+ u"\nПохожих найдено: "_q
+		+ L(u"\nПохожих найдено: "_q, u"\nSimilar found: "_q)
 		+ QString::number(int(matches.size()))
 		+ u"\n\n"_q;
 	for (const auto &[distance, entry] : matches) {
-		text += (distance == 0 ? u"[точное совпадение] "_q : (u"[отличие "_q
+		text += (distance == 0 ? L(u"[точное совпадение] "_q, u"[exact match] "_q) : (L(u"[отличие "_q, u"[difference "_q)
 				+ QString::number(distance)
 				+ u"/64] "_q))
 			+ entry.chat + '\n'
@@ -852,10 +941,12 @@ void ShowSimilarPhotos(
 			+ (entry.link.isEmpty() ? QString() : (u"  "_q + entry.link))
 			+ u"\n\n"_q;
 	}
-	text += u"Индекс пополняется кнопкой «Индексировать фото» в анализе "_q
-		u"чата. Чем больше чатов проиндексировано, тем полнее поиск."_q;
-	ShowTextBox(controller, u"OSINT: где ещё это фото"_q, text, {
-		{ u"Копировать"_q, [=] {
+	text += L(u"Индекс пополняется кнопкой «Индексировать фото» в анализе "
+		u"чата. Чем больше чатов проиндексировано, тем полнее поиск."_q,
+		u"Add photos to the index with «Index photos» in chat analysis. "
+		u"The more chats are indexed, the better the search."_q);
+	ShowTextBox(controller, L(u"OSINT: где ещё это фото"_q, u"OSINT: where else is this photo"_q), text, {
+		{ L(u"Копировать"_q, u"Copy"_q), [=] {
 			QGuiApplication::clipboard()->setText(text);
 		} },
 	});
@@ -866,9 +957,9 @@ void IndexChatPhotos(
 		not_null<Window::SessionController*> controller) {
 	auto notLoaded = 0;
 	const auto added = AddToIndex(LoadedItems(history), &notLoaded);
-	auto text = u"Добавлено фото в индекс: "_q + QString::number(added);
+	auto text = L(u"Добавлено фото в индекс: "_q, u"Photos added to the index: "_q) + QString::number(added);
 	if (notLoaded > 0) {
-		text += u". Не загружено (пропущено): "_q
+		text += L(u". Не загружено (пропущено): "_q, u". Not loaded (skipped): "_q)
 			+ QString::number(notLoaded);
 	}
 	controller->showToast(text);
@@ -934,88 +1025,45 @@ void LogHit(not_null<HistoryItem*> item, const QString &keyword) {
 	f.write(line.toUtf8());
 }
 
+
+
 } // namespace
-
-std::vector<Indicator> ExtractIndicators(const QString &text) {
-	auto result = std::vector<Indicator>();
-	if (text.isEmpty()) {
-		return result;
-	}
-	static const auto patterns = std::vector<std::pair<QString, QRegularExpression>>{
-		{ u"url"_q, QRegularExpression(
-			u"(?i)\\b(?:https?://|www\\.|t\\.me/|telegram\\.me/)[^\\s<>\"'()\\[\\]{}]+"_q) },
-		{ u"mention"_q, QRegularExpression(
-			u"(?<![\\w@/])@[A-Za-z][A-Za-z0-9_]{3,31}\\b"_q) },
-		{ u"email"_q, QRegularExpression(
-			u"\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"_q) },
-		{ u"wallet_btc"_q, QRegularExpression(
-			u"\\b(?:bc1[a-z0-9]{25,59}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\\b"_q) },
-		{ u"wallet_evm"_q, QRegularExpression(
-			u"\\b0x[a-fA-F0-9]{40}\\b"_q) },
-		{ u"wallet_tron"_q, QRegularExpression(
-			u"\\bT[1-9A-HJ-NP-Za-km-z]{33}\\b"_q) },
-		{ u"wallet_ton"_q, QRegularExpression(
-			u"(?<![A-Za-z0-9_-])(?:EQ|UQ)[A-Za-z0-9_-]{46}(?![A-Za-z0-9_-])"_q) },
-	};
-	for (const auto &[type, regex] : patterns) {
-		auto it = regex.globalMatch(text);
-		while (it.hasNext()) {
-			auto value = it.next().captured(0);
-			if (type == u"url"_q) {
-				while (!value.isEmpty()
-					&& u".,;:!?»"_q.contains(value.back())) {
-					value.chop(1);
-				}
-			}
-			if (!value.isEmpty()) {
-				result.push_back({ type, value });
-			}
-		}
-	}
-	return result;
-}
-
-QString Sha256(const QByteArray &data) {
-	return QString::fromLatin1(
-		QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex());
-}
-
-QString Utc(TimeId date) {
-	if (date <= 0) {
-		return u"-"_q;
-	}
-	return QDateTime::fromSecsSinceEpoch(date).toUTC().toString(
-		u"yyyy-MM-dd HH:mm:ss"_q) + u" UTC"_q;
-}
 
 void AddMessageActions(
 		not_null<Ui::PopupMenu*> menu,
 		not_null<HistoryItem*> item,
 		not_null<Window::SessionController*> controller) {
-	if (item->id.bare <= 0 || item->isService()) {
+	if (item->id.bare <= 0
+		|| item->isService()
+		|| !CurrentSettings().showMenu) {
 		return;
 	}
 	const auto weak = base::make_weak(controller);
 	const auto itemId = item->fullId();
 	const auto history = item->history();
 	menu->addSeparator();
-	menu->addAction(u"OSINT: отчёт по сообщению"_q, [=] {
+	menu->addAction(L(u"OSINT: отчёт по сообщению"_q, u"OSINT: message report"_q), [=] {
 		if (const auto strong = weak.get()) {
 			if (const auto found = strong->session().data().message(itemId)) {
 				ShowMessageReport(found, strong);
 			}
 		}
 	}, &st::menuIconInfo);
-	menu->addAction(u"OSINT: анализ чата"_q, [=] {
+	menu->addAction(L(u"OSINT: анализ чата"_q, u"OSINT: chat analysis"_q), [=] {
 		if (const auto strong = weak.get()) {
 			ShowChatAnalysis(history, strong);
 		}
 	}, &st::menuIconStats);
-	menu->addAction(u"OSINT: заметки к чату"_q, [=] {
+	menu->addAction(L(u"OSINT: заметки к чату"_q, u"OSINT: chat notes"_q), [=] {
 		if (const auto strong = weak.get()) {
 			ShowNotes(history, strong);
 		}
 	}, &st::menuIconEdit);
+	menu->addAction(L(u"OSINT: удалённые и изменённые"_q, u"OSINT: deleted and edited"_q), [=] {
+		if (const auto strong = weak.get()) {
+			ShowJournal(history, strong);
+		}
+	}, &st::menuIconDelete);
 
 	auto indicators = ItemIndicators(item);
 	if (!indicators.empty()) {
@@ -1033,7 +1081,7 @@ void AddMessageActions(
 			});
 		}
 		menu->addAction(
-			u"OSINT: искать во всех чатах"_q,
+			L(u"OSINT: искать во всех чатах"_q, u"OSINT: search in all chats"_q),
 			std::move(search),
 			&st::menuIconSearch);
 	}
@@ -1041,8 +1089,8 @@ void AddMessageActions(
 	if (ItemPhoto(item)) {
 		auto photo = std::make_unique<Ui::PopupMenu>(menu, menu->st());
 		const auto engines = std::vector<std::pair<QString, QString>>{
-			{ u"Яндекс Картинки"_q, u"https://yandex.ru/images/"_q },
-			{ u"Google Картинки"_q, u"https://images.google.com/"_q },
+			{ L(u"Яндекс Картинки"_q, u"Yandex Images"_q), u"https://yandex.ru/images/"_q },
+			{ L(u"Google Картинки"_q, u"Google Images"_q), u"https://images.google.com/"_q },
 			{ u"Bing"_q, u"https://www.bing.com/visualsearch"_q },
 			{ u"TinEye"_q, u"https://tineye.com/"_q },
 		};
@@ -1057,7 +1105,7 @@ void AddMessageActions(
 				}
 			});
 		}
-		photo->addAction(u"Где ещё было это фото"_q, [=] {
+		photo->addAction(L(u"Где ещё было это фото"_q, u"Where else was this photo"_q), [=] {
 			if (const auto strong = weak.get()) {
 				if (const auto found = strong->session().data().message(
 						itemId)) {
@@ -1066,12 +1114,12 @@ void AddMessageActions(
 			}
 		});
 		menu->addAction(
-			u"OSINT: поиск по фото"_q,
+			L(u"OSINT: поиск по фото"_q, u"OSINT: photo search"_q),
 			std::move(photo),
 			&st::menuIconPhoto);
 	}
 
-	menu->addAction(u"OSINT: мониторинг слов"_q, [=] {
+	menu->addAction(L(u"OSINT: мониторинг слов"_q, u"OSINT: keyword monitoring"_q), [=] {
 		if (const auto strong = weak.get()) {
 			ShowMonitorSettings(strong);
 		}
@@ -1084,14 +1132,14 @@ void ShowMessageReport(
 	const auto report = BuildReport(item);
 	const auto weak = base::make_weak(controller);
 	const auto itemId = item->fullId();
-	ShowTextBox(controller, u"OSINT-отчёт"_q, report, {
-		{ u"Копировать"_q, [=] {
+	ShowTextBox(controller, L(u"OSINT-отчёт"_q, u"OSINT report"_q), report, {
+		{ L(u"Копировать"_q, u"Copy"_q), [=] {
 			QGuiApplication::clipboard()->setText(report);
 			if (const auto strong = weak.get()) {
-				strong->showToast(u"Отчёт скопирован"_q);
+				strong->showToast(L(u"Отчёт скопирован"_q, u"Report copied"_q));
 			}
 		} },
-		{ u"Сохранить доказательство"_q, [=] {
+		{ L(u"Сохранить доказательство"_q, u"Save evidence"_q), [=] {
 			if (const auto strong = weak.get()) {
 				if (const auto found = strong->session().data().message(
 						itemId)) {
@@ -1109,23 +1157,23 @@ void ShowChatAnalysis(
 		history,
 		CollectStats(LoadedItems(history)));
 	const auto weak = base::make_weak(controller);
-	ShowTextBox(controller, u"OSINT: анализ чата"_q, text, {
-		{ u"Индикаторы в CSV"_q, [=] {
+	ShowTextBox(controller, L(u"OSINT: анализ чата"_q, u"OSINT: chat analysis"_q), text, {
+		{ L(u"Индикаторы в CSV"_q, u"Indicators to CSV"_q), [=] {
 			if (const auto strong = weak.get()) {
 				ExportIndicators(history, strong);
 			}
 		} },
-		{ u"Архив с хешами"_q, [=] {
+		{ L(u"Архив с хешами"_q, u"Archive with hashes"_q), [=] {
 			if (const auto strong = weak.get()) {
 				ExportArchive(history, strong);
 			}
 		} },
-		{ u"Индексировать фото"_q, [=] {
+		{ L(u"Индексировать фото"_q, u"Index photos"_q), [=] {
 			if (const auto strong = weak.get()) {
 				IndexChatPhotos(history, strong);
 			}
 		} },
-		{ u"Копировать"_q, [=] {
+		{ L(u"Копировать"_q, u"Copy"_q), [=] {
 			QGuiApplication::clipboard()->setText(text);
 		} },
 	});
@@ -1145,13 +1193,13 @@ void ShowNotes(
 	const auto weak = base::make_weak(controller);
 	const auto title = PeerLine(history->peer);
 	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
-		box->setTitle(rpl::single(u"Заметки: "_q + history->peer->name()));
+		box->setTitle(rpl::single(L(u"Заметки: "_q, u"Notes: "_q) + history->peer->name()));
 		box->setWidth(st::boxWideWidth * 3 / 2);
 		const auto field = box->addRow(object_ptr<Ui::InputField>(
 			box,
 			st::editPeerDescription,
 			Ui::InputField::Mode::MultiLine,
-			rpl::single(u"Пишите сюда всё, что нашли по этому чату"_q),
+			rpl::single(L(u"Пишите сюда всё, что нашли по этому чату"_q, u"Write down everything you found about this chat"_q)),
 			current));
 		field->setMinHeight(st::boxWideWidth);
 		const auto save = [=](bool close) {
@@ -1161,7 +1209,7 @@ void ShowNotes(
 			}
 			if (WriteFile(path, text.toUtf8())) {
 				if (const auto strong = weak.get()) {
-					strong->showToast(u"Заметки сохранены"_q);
+					strong->showToast(L(u"Заметки сохранены"_q, u"Notes saved"_q));
 				}
 			}
 			if (close) {
@@ -1169,46 +1217,175 @@ void ShowNotes(
 			}
 		};
 		box->setFocusCallback([=] { field->setFocusFast(); });
-		box->addButton(rpl::single(u"Сохранить"_q), [=] { save(true); });
-		box->addButton(rpl::single(u"Открыть папку"_q), [=] {
+		box->addButton(rpl::single(L(u"Сохранить"_q, u"Save"_q)), [=] { save(true); });
+		box->addButton(rpl::single(L(u"Открыть папку"_q, u"Open folder"_q)), [=] {
 			save(false);
 			File::ShowInFolder(path);
 		});
-		box->addButton(rpl::single(u"Закрыть"_q), [=] {
+		box->addButton(rpl::single(L(u"Закрыть"_q, u"Close"_q)), [=] {
 			box->closeBox();
 		});
 	}));
 }
 
-uint64 ImageHash(const QImage &image) {
-	// Difference hash: 9x8 grayscale, compare horizontal neighbours.
-	const auto small = image.convertToFormat(QImage::Format_Grayscale8).scaled(
-		9,
-		8,
-		Qt::IgnoreAspectRatio,
-		Qt::SmoothTransformation);
-	auto result = uint64(0);
-	auto bit = 0;
-	for (auto y = 0; y != 8; ++y) {
-		const auto line = small.constScanLine(y);
-		for (auto x = 0; x != 8; ++x) {
-			if (line[x] > line[x + 1]) {
-				result |= (uint64(1) << bit);
-			}
-			++bit;
-		}
-	}
-	return result;
+QString FolderPath() {
+	return OutputFolder();
 }
 
-int HashDistance(uint64 a, uint64 b) {
-	auto value = a ^ b;
-	auto result = 0;
-	while (value) {
-		value &= (value - 1);
-		++result;
+const Settings &CurrentSettings() {
+	return MutableSettings();
+}
+
+void UpdateSettings(Fn<void(Settings&)> change) {
+	auto &settings = MutableSettings();
+	change(settings);
+	(void)WriteFile(SettingsPath(), settings.serialize());
+}
+
+bool Russian() {
+	return Lang::Id().startsWith(u"ru"_q);
+}
+
+bool GhostNoRead() {
+	return CurrentSettings().ghostNoRead;
+}
+
+bool GhostOffline() {
+	return CurrentSettings().ghostOffline;
+}
+
+bool GhostNoStories() {
+	return CurrentSettings().ghostNoStories;
+}
+
+bool GhostNoTyping() {
+	return CurrentSettings().ghostNoTyping;
+}
+
+bool OnMessagesDeleted(const std::vector<not_null<HistoryItem*>> &items) {
+	const auto &settings = CurrentSettings();
+	if (!settings.keepDeleted || items.empty()) {
+		return false;
 	}
-	return result;
+	auto lines = QByteArray();
+	const auto now = Now();
+	for (const auto &item : items) {
+		DeletedMessages()[item->fullId()] = now;
+		if (item->isService() || item->id.bare <= 0) {
+			continue;
+		}
+		const auto peer = item->history()->peer;
+		auto record = JournalRecord();
+		record.kind = JournalRecord::Kind::Deleted;
+		record.chatId = BareId(peer);
+		record.messageId = item->id.bare;
+		record.date = item->date();
+		record.at = now;
+		record.chat = PeerLine(peer);
+		record.sender = PeerLine(item->from().get());
+		record.text = item->originalText().text;
+		lines += record.toLine();
+	}
+	AppendJournal(lines);
+	if (settings.markDeleted) {
+		for (const auto &item : items) {
+			item->history()->owner().requestItemViewRefresh(item);
+		}
+	}
+	return true;
+}
+
+void OnMessageEdited(
+		not_null<HistoryItem*> item,
+		const QString &newText,
+		TimeId editDate) {
+	if (!CurrentSettings().keepEdits
+		|| item->isService()
+		|| item->out()
+		|| item->id.bare <= 0) {
+		return;
+	}
+	const auto oldText = item->originalText().text;
+	if (oldText == newText) {
+		return;
+	}
+	const auto peer = item->history()->peer;
+	auto record = JournalRecord();
+	record.kind = JournalRecord::Kind::Edited;
+	record.chatId = BareId(peer);
+	record.messageId = item->id.bare;
+	record.date = item->date();
+	record.at = editDate ? editDate : Now();
+	record.chat = PeerLine(peer);
+	record.sender = PeerLine(item->from().get());
+	record.text = oldText;
+	record.newText = newText;
+	AppendJournal(record.toLine());
+}
+
+QString BottomMark(not_null<const HistoryItem*> item) {
+	if (!CurrentSettings().markDeleted) {
+		return QString();
+	}
+	return DeletedMessages().contains(item->fullId())
+		? L(u"удалено"_q, u"deleted"_q)
+		: QString();
+}
+
+QString CleanLink(const QString &url) {
+	return CurrentSettings().stripTracking ? StripTracking(url) : url;
+}
+
+void ShowJournal(
+		not_null<History*> history,
+		not_null<Window::SessionController*> controller) {
+	auto records = ReadJournal(BareId(history->peer));
+	auto text = QString();
+	text += L(u"Чат: "_q, u"Chat: "_q) + PeerLine(history->peer) + '\n';
+	text += L(u"Записей: "_q, u"Records: "_q)
+		+ QString::number(int(records.size())) + u"\n\n"_q;
+	auto shown = 0;
+	for (auto i = records.rbegin(); i != records.rend(); ++i) {
+		if (++shown > 300) {
+			text += L(u"… показаны последние 300\n"_q, u"… last 300 shown\n"_q);
+			break;
+		}
+		const auto &r = *i;
+		if (r.kind == JournalRecord::Kind::Deleted) {
+			text += L(u"[УДАЛЕНО] "_q, u"[DELETED] "_q);
+		} else {
+			text += L(u"[ИЗМЕНЕНО] "_q, u"[EDITED] "_q);
+		}
+		text += u"#"_q + QString::number(r.messageId)
+			+ u" · "_q + r.sender + '\n'
+			+ L(u"Отправлено: "_q, u"Sent: "_q) + Utc(r.date) + '\n'
+			+ ((r.kind == JournalRecord::Kind::Deleted)
+				? L(u"Удалено: "_q, u"Deleted: "_q)
+				: L(u"Изменено: "_q, u"Edited: "_q))
+			+ Utc(r.at) + '\n';
+		if (r.kind == JournalRecord::Kind::Deleted) {
+			text += L(u"Текст: "_q, u"Text: "_q) + r.text + u"\n\n"_q;
+		} else {
+			text += L(u"Было: "_q, u"Before: "_q) + r.text + '\n'
+				+ L(u"Стало: "_q, u"After: "_q) + r.newText + u"\n\n"_q;
+		}
+	}
+	if (records.empty()) {
+		text += L(
+			u"Пока ничего. Удалённые и изменённые сообщения появятся "
+			u"здесь, если в настройках OsintGram включено их сохранение."_q,
+			u"Nothing yet. Deleted and edited messages appear here when "
+			u"saving them is enabled in OsintGram settings."_q);
+	}
+	const auto path = JournalPath();
+	ShowTextBox(controller, L(u"Удалённые и изменённые"_q, u"Deleted and edited"_q), text, {
+		{ L(u"Копировать"_q, u"Copy"_q), [=] {
+			QGuiApplication::clipboard()->setText(text);
+		} },
+		{ L(u"Открыть папку"_q, u"Open folder"_q), [=] {
+			File::ShowInFolder(path);
+		} },
+	});
 }
 
 void StartMonitor(not_null<Window::SessionController*> controller) {
@@ -1217,7 +1394,10 @@ void StartMonitor(not_null<Window::SessionController*> controller) {
 	controller->session().data().newItemAdded(
 	) | rpl::on_next([=](not_null<HistoryItem*> item) {
 		const auto &keywords = Monitor().keywords;
-		if (keywords.isEmpty() || item->out() || item->isService()) {
+		if (keywords.isEmpty()
+			|| !CurrentSettings().monitorEnabled
+			|| item->out()
+			|| item->isService()) {
 			return;
 		}
 		const auto text = item->originalText().text.toLower();
@@ -1227,10 +1407,12 @@ void StartMonitor(not_null<Window::SessionController*> controller) {
 		for (const auto &keyword : keywords) {
 			if (text.contains(keyword)) {
 				LogHit(item, keyword);
-				if (const auto strong = weak.get()) {
-					strong->showToast(u"OSINT-мониторинг: «"_q
+				if (!CurrentSettings().monitorToasts) {
+					break;
+				} else if (const auto strong = weak.get()) {
+					strong->showToast(L(u"OSINT-мониторинг: «"_q, u"OSINT monitoring: «"_q)
 						+ keyword
-						+ u"» в "_q
+						+ L(u"» в "_q, u"» in "_q)
 						+ item->history()->peer->name());
 				}
 				break;
@@ -1243,34 +1425,39 @@ void ShowMonitorSettings(not_null<Window::SessionController*> controller) {
 	const auto current = ReadKeywordsText();
 	const auto weak = base::make_weak(controller);
 	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
-		box->setTitle(rpl::single(u"OSINT: мониторинг слов"_q));
+		box->setTitle(rpl::single(L(u"OSINT: мониторинг слов"_q, u"OSINT: keyword monitoring"_q)));
 		box->setWidth(st::boxWideWidth * 3 / 2);
 		box->addRow(object_ptr<Ui::FlatLabel>(
 			box,
-			u"По одному слову, фразе, кошельку или ссылке на строку. "_q
-			u"Когда новое сообщение в любом вашем чате или канале "_q
-			u"содержит одно из них, появится уведомление, а находка "_q
-			u"запишется в Загрузки/OsintGram/monitor/hits.csv. "_q
+			L(u"По одному слову, фразе, кошельку или ссылке на строку. "
+			u"Когда новое сообщение в любом вашем чате или канале "
+			u"содержит одно из них, появится уведомление, а находка "
+			u"запишется в Загрузки/OsintGram/monitor/hits.csv. "
 			u"Строки, начинающиеся с #, пропускаются."_q,
+			u"One word, phrase, wallet or link per line. When a new "
+			u"message in any of your chats or channels contains one of "
+			u"them, you get a notification and the hit is written to "
+			u"Downloads/OsintGram/monitor/hits.csv. Lines starting with # "
+			u"are skipped."_q),
 			st::boxLabel));
 		const auto field = box->addRow(object_ptr<Ui::InputField>(
 			box,
 			st::editPeerDescription,
 			Ui::InputField::Mode::MultiLine,
-			rpl::single(u"например: airdrop\nTLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7"_q),
+			rpl::single(L(u"например: airdrop\nTLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7"_q, u"for example: airdrop\nTLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7"_q)),
 			current));
 		field->setMinHeight(st::boxWideWidth / 2);
 		box->setFocusCallback([=] { field->setFocusFast(); });
-		box->addButton(rpl::single(u"Сохранить"_q), [=] {
+		box->addButton(rpl::single(L(u"Сохранить"_q, u"Save"_q)), [=] {
 			if (!WriteFile(KeywordsPath(), field->getLastText().toUtf8())) {
 				if (const auto strong = weak.get()) {
-					strong->showToast(u"Не удалось сохранить список"_q);
+					strong->showToast(L(u"Не удалось сохранить список"_q, u"Could not save the list"_q));
 				}
 			}
 			ReloadKeywords();
 			box->closeBox();
 		});
-		box->addButton(rpl::single(u"Журнал находок"_q), [=] {
+		box->addButton(rpl::single(L(u"Журнал находок"_q, u"Hits log"_q)), [=] {
 			if (!QFile::exists(HitsPath())) {
 				(void)WriteFile(
 					HitsPath(),
@@ -1280,7 +1467,7 @@ void ShowMonitorSettings(not_null<Window::SessionController*> controller) {
 			}
 			File::ShowInFolder(HitsPath());
 		});
-		box->addButton(rpl::single(u"Закрыть"_q), [=] {
+		box->addButton(rpl::single(L(u"Закрыть"_q, u"Close"_q)), [=] {
 			box->closeBox();
 		});
 	}));

@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_session.h"
 
+#include "menu/menu_osint.h"
+
 #include "main/main_session.h"
 #include "main/main_session_settings.h"
 #include "main/main_app_config.h"
@@ -3361,6 +3363,10 @@ void Session::processMessagesDeleted(
 			affected->unknownMessageDeleted(messageId.v);
 		}
 	}
+	if (!toDestroy.empty() && Osint::OnMessagesDeleted(toDestroy)) {
+		// Ghost mode keeps messages deleted by other people.
+		toDestroy.clear();
+	}
 	if (!toDestroy.empty()) {
 		notifyItemsAboutToBeDestroyed(toDestroy);
 		for (const auto &item : toDestroy) {
@@ -3384,6 +3390,10 @@ void Session::processNonChannelMessagesDeleted(const QVector<MTPint> &data) {
 			toDestroy.push_back(item);
 			historiesToCheck.emplace(history);
 		}
+	}
+	if (!toDestroy.empty() && Osint::OnMessagesDeleted(toDestroy)) {
+		// Ghost mode keeps messages deleted by other people.
+		toDestroy.clear();
 	}
 	if (!toDestroy.empty()) {
 		notifyItemsAboutToBeDestroyed(toDestroy);

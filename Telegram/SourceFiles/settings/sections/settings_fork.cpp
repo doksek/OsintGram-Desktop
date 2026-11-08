@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "settings/sections/settings_fork.h"
 
+#include "settings/sections/settings_osint.h"
+
 #include "api/api_authorizations.h"
 #include "apiwrap.h"
 #include "base/timer.h"
@@ -314,6 +316,7 @@ void MarkdownClipboardTextBox::prepare() {
 using namespace Builder;
 
 void BuildForkSectionContent(SectionBuilder &builder) {
+	BuildOsintSettings(builder);
 	const auto controller = builder.controller();
 	struct State {
 		rpl::variable<bool> checked;

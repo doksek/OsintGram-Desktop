@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_stories.h"
 
+#include "menu/menu_osint.h"
+
 #include "base/unixtime.h"
 #include "apiwrap.h"
 #include "core/application.h"
@@ -1390,6 +1392,9 @@ void Stories::toggleHidden(
 void Stories::sendMarkAsReadRequest(
 		not_null<PeerData*> peer,
 		StoryId tillId) {
+	if (Osint::GhostNoStories()) {
+		return;
+	}
 	const auto peerId = peer->id;
 	_markReadRequests.emplace(peerId);
 	const auto finish = [=] {
@@ -1435,6 +1440,9 @@ void Stories::sendMarkAsReadRequests() {
 
 void Stories::sendIncrementViewsRequests() {
 	if (_incrementViewsPending.empty()) {
+		return;
+	} else if (Osint::GhostNoStories()) {
+		_incrementViewsPending.clear();
 		return;
 	}
 	struct Prepared {

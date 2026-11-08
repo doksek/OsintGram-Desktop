@@ -75,6 +75,7 @@ endif()
 include(cmake/test_iv_editor_table_grid.cmake)
 include(cmake/test_wallet_card_tint.cmake)
 include(cmake/test_wallet_phrase_shares.cmake)
+include(cmake/test_osint_core.cmake)
 
 set_target_properties(Telegram PROPERTIES AUTOMOC ON)
 
@@ -1713,6 +1714,8 @@ PRIVATE
     menu/menu_antispam_validator.cpp
     menu/menu_osint.cpp
     menu/menu_osint.h
+    menu/menu_osint_core.cpp
+    menu/menu_osint_core.h
     menu/menu_antispam_validator.h
     menu/menu_dock.cpp
     menu/menu_dock.h
@@ -1986,6 +1989,8 @@ PRIVATE
     settings/sections/settings_calls.h
     settings/sections/settings_fork.cpp
     settings/sections/settings_fork.h
+    settings/sections/settings_osint.cpp
+    settings/sections/settings_osint.h
     settings/sections/settings_link_device.cpp
     settings/sections/settings_link_device.h
     settings/settings_codes.cpp

@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/history_item.h"
 
+#include "menu/menu_osint.h"
+
 #include "api/api_premium.h"
 #include "api/api_sensitive_content.h"
 #include "api/api_transcribes.h"
@@ -2475,6 +2477,10 @@ void HistoryItem::applyEdition(HistoryMessageEdition &&edition) {
 	if (_isServiceMessage) {
 		return;
 	}
+	Osint::OnMessageEdited(
+		this,
+		edition.textWithEntities.text,
+		edition.editDate);
 	history()->session().ephemeralMessages().revertAnchored(this);
 
 	int keyboardTop = -1;

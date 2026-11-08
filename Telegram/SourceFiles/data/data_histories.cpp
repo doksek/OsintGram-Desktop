@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_histories.h"
 
+#include "menu/menu_osint.h"
+
 #include "api/api_text_entities.h"
 #include "data/business/data_shortcut_messages.h"
 #include "data/components/ephemeral_messages.h"
@@ -755,6 +757,19 @@ void Histories::sendReadRequest(not_null<History*> history, State &state) {
 	sendRequest(history, RequestType::ReadInbox, [=](Fn<void()> finish) {
 		DEBUG_LOG(("Reading: sending request invoked with till %1."
 			).arg(tillId.bare));
+		if (Osint::GhostNoRead()) {
+			// Ghost mode: read locally, never tell the server.
+			crl::on_main(&session(), [=] {
+				if (const auto state = lookup(history)) {
+					if (state->sentReadTill == tillId) {
+						state->sentReadDone = true;
+						state->sentReadTill = 0;
+					}
+				}
+				finish();
+			});
+			return mtpRequestId(0);
+		}
 		const auto finished = [=] {
 			const auto state = lookup(history);
 			Assert(state != nullptr);

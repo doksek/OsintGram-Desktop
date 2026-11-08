@@ -436,6 +436,13 @@ jobs:
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out
           key: ${{ runner.OS }}-${{ matrix.arch }}-out-rel-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
+      - name: OsintGram tests.
+        if: env.ONLY_CACHE == 'false'
+        run: |
+          cd %TBUILD%\%REPO_NAME%\out
+          cmake --build . --config Release --target test_osint_core --parallel 2 || exit /b 1
+          test_osint_core\Release\test_osint_core.exe || exit /b 1
+
       - name: Collect the artifacts.
         if: env.ONLY_CACHE == 'false'
         shell: pwsh

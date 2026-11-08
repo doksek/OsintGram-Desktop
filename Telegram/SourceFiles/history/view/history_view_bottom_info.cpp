@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/history_view_bottom_info.h"
 
+#include "menu/menu_osint.h"
+
 #include "ui/chat/message_bubble.h"
 #include "ui/chat/chat_style.h"
 #include "ui/effects/reaction_fly_animation.h"
@@ -695,6 +697,11 @@ BottomInfo::Data BottomInfoDataFromMessage(not_null<Message*> message) {
 				result.author = msgsigned->author;
 			}
 		}
+	}
+	if (const auto mark = Osint::BottomMark(item.get()); !mark.isEmpty()) {
+		result.author = result.author.isEmpty()
+			? mark
+			: (mark + u", "_q + result.author);
 	}
 	if (const auto editedDate = message->displayedEditDate()) {
 		result.flags |= Flag::Edited;
