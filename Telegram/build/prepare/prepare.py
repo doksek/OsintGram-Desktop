@@ -568,9 +568,10 @@ win:
     SET CHERE_INVOKING=enabled_from_arguments
     SET MSYS2_PATH_TYPE=inherit
 
-    curl.exe -L --fail --retry 8 --retry-all-errors --retry-delay 20 -o ./msys64.exe https://github.com/msys2/msys2-installer/releases/download/2026-09-27/msys2-base-x86_64-20260927.sfx.exe
-    msys64.exe
-    del msys64.exe
+    if exist C:\\msys64\\usr\\bin\\bash.exe xcopy /E /I /Q /H /K /Y C:\\msys64 msys64
+    if not exist msys64\\usr\\bin\\bash.exe curl.exe -L --fail --retry 8 --retry-all-errors --retry-delay 20 -o ./msys64.exe https://github.com/msys2/msys2-installer/releases/download/2026-09-27/msys2-base-x86_64-20260927.sfx.exe
+    if not exist msys64\\usr\\bin\\bash.exe msys64.exe
+    if exist msys64.exe del msys64.exe
 
     bash -c "pacman-key --init; pacman-key --populate; pacman -Syu --noconfirm"
     pacman -Syu --noconfirm ^
