@@ -7,19 +7,23 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "menu/menu_osint.h"
 
+#include "base/flat_set.h"
 #include "core/file_utilities.h"
 #include "data/data_channel.h"
 #include "data/data_document.h"
 #include "data/data_media_types.h"
 #include "data/data_peer.h"
 #include "data/data_photo.h"
+#include "data/data_photo_media.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
+#include "dialogs/dialogs_key.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "history/history_item_components.h"
 #include "history/view/history_view_element.h"
 #include "main/main_session.h"
+#include "ui/image/image.h"
 #include "ui/layers/generic_box.h"
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
@@ -38,7 +42,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QJsonObject>
 #include <QtCore/QRegularExpression>
 #include <QtCore/QStandardPaths>
+#include <QtCore/QUrl>
 #include <QtGui/QClipboard>
+#include <QtGui/QDesktopServices>
 #include <QtGui/QGuiApplication>
 
 namespace Osint {
@@ -660,6 +666,274 @@ void ExportArchive(
 		+ u".md"_q;
 }
 
+
+// ---------------------------------------------------------------------
+// Photos: reverse search and the local index of perceptual hashes.
+
+[[nodiscard]] PhotoData *ItemPhoto(not_null<HistoryItem*> item) {
+	const auto media = item->media();
+	return media ? media->photo() : nullptr;
+}
+
+[[nodiscard]] QImage LoadedPhotoImage(not_null<HistoryItem*> item) {
+	const auto photo = ItemPhoto(item);
+	if (!photo) {
+		return QImage();
+	}
+	const auto view = photo->activeMediaView();
+	if (!view) {
+		return QImage();
+	}
+	for (const auto size : {
+		Data::PhotoSize::Large,
+		Data::PhotoSize::Thumbnail,
+		Data::PhotoSize::Small,
+	}) {
+		if (const auto image = view->image(size)) {
+			return image->original();
+		}
+	}
+	return QImage();
+}
+
+struct IndexEntry {
+	uint64 hash = 0;
+	QString key;
+	QString chat;
+	QString date;
+	QString link;
+};
+
+[[nodiscard]] QString IndexPath() {
+	return OutputFolder(u"images"_q) + u"/index.tsv"_q;
+}
+
+[[nodiscard]] QString ItemKey(not_null<HistoryItem*> item) {
+	return QString::number(BareId(item->history()->peer))
+		+ ':'
+		+ QString::number(item->id.bare);
+}
+
+[[nodiscard]] std::vector<IndexEntry> ReadIndex() {
+	auto result = std::vector<IndexEntry>();
+	auto f = QFile(IndexPath());
+	if (!f.open(QIODevice::ReadOnly)) {
+		return result;
+	}
+	const auto lines = QString::fromUtf8(f.readAll()).split('\n');
+	for (const auto &line : lines) {
+		const auto parts = line.split('\t');
+		if (parts.size() < 5) {
+			continue;
+		}
+		auto ok = false;
+		const auto hash = parts[0].toULongLong(&ok, 16);
+		if (!ok) {
+			continue;
+		}
+		result.push_back({
+			.hash = hash,
+			.key = parts[1],
+			.chat = parts[2],
+			.date = parts[3],
+			.link = parts[4],
+		});
+	}
+	return result;
+}
+
+[[nodiscard]] QString Clean(QString value) {
+	return value.replace('\t', ' ').replace('\n', ' ');
+}
+
+// Returns how many new photos were added to the index.
+int AddToIndex(
+		const std::vector<not_null<HistoryItem*>> &items,
+		int *notLoaded = nullptr) {
+	auto known = base::flat_set<QString>();
+	for (const auto &entry : ReadIndex()) {
+		known.emplace(entry.key);
+	}
+	auto added = QString();
+	auto count = 0;
+	for (const auto &item : items) {
+		if (!ItemPhoto(item)) {
+			continue;
+		}
+		const auto key = ItemKey(item);
+		if (known.contains(key)) {
+			continue;
+		}
+		const auto image = LoadedPhotoImage(item);
+		if (image.isNull()) {
+			if (notLoaded) {
+				++*notLoaded;
+			}
+			continue;
+		}
+		known.emplace(key);
+		added += QString::number(ImageHash(image), 16)
+			+ '\t' + key
+			+ '\t' + Clean(PeerLine(item->history()->peer))
+			+ '\t' + Utc(item->date())
+			+ '\t' + MessageLink(item->history()->peer, item->id)
+			+ '\n';
+		++count;
+	}
+	if (count > 0) {
+		auto f = QFile(IndexPath());
+		if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+			f.write(added.toUtf8());
+		}
+	}
+	return count;
+}
+
+void ReverseSearch(
+		not_null<HistoryItem*> item,
+		not_null<Window::SessionController*> controller,
+		const QString &url) {
+	const auto image = LoadedPhotoImage(item);
+	if (image.isNull()) {
+		controller->showToast(
+			u"Сначала откройте фото, чтобы оно загрузилось"_q);
+		return;
+	}
+	const auto path = OutputFolder(u"images"_q)
+		+ u"/photo_"_q
+		+ ItemKey(item).replace(':', '_')
+		+ u".jpg"_q;
+	image.save(path, "JPG", 95);
+	QGuiApplication::clipboard()->setImage(image);
+	QDesktopServices::openUrl(QUrl(url));
+	controller->showToast(
+		u"Фото скопировано: на открывшейся странице нажмите Ctrl+V. "_q
+		u"Файл также сохранён в Загрузки/OsintGram/images"_q);
+}
+
+void ShowSimilarPhotos(
+		not_null<HistoryItem*> item,
+		not_null<Window::SessionController*> controller) {
+	const auto image = LoadedPhotoImage(item);
+	if (image.isNull()) {
+		controller->showToast(
+			u"Сначала откройте фото, чтобы оно загрузилось"_q);
+		return;
+	}
+	AddToIndex({ item });
+	const auto hash = ImageHash(image);
+	const auto key = ItemKey(item);
+	auto matches = std::vector<std::pair<int, IndexEntry>>();
+	const auto index = ReadIndex();
+	for (const auto &entry : index) {
+		if (entry.key == key) {
+			continue;
+		}
+		const auto distance = HashDistance(hash, entry.hash);
+		if (distance <= 8) {
+			matches.emplace_back(distance, entry);
+		}
+	}
+	ranges::sort(matches, ranges::less(), [](const auto &pair) {
+		return pair.first;
+	});
+	auto text = QString();
+	text += u"Фото в индексе: "_q
+		+ QString::number(int(index.size()))
+		+ u"\nПохожих найдено: "_q
+		+ QString::number(int(matches.size()))
+		+ u"\n\n"_q;
+	for (const auto &[distance, entry] : matches) {
+		text += (distance == 0 ? u"[точное совпадение] "_q : (u"[отличие "_q
+				+ QString::number(distance)
+				+ u"/64] "_q))
+			+ entry.chat + '\n'
+			+ entry.date
+			+ (entry.link.isEmpty() ? QString() : (u"  "_q + entry.link))
+			+ u"\n\n"_q;
+	}
+	text += u"Индекс пополняется кнопкой «Индексировать фото» в анализе "_q
+		u"чата. Чем больше чатов проиндексировано, тем полнее поиск."_q;
+	ShowTextBox(controller, u"OSINT: где ещё это фото"_q, text, {
+		{ u"Копировать"_q, [=] {
+			QGuiApplication::clipboard()->setText(text);
+		} },
+	});
+}
+
+void IndexChatPhotos(
+		not_null<History*> history,
+		not_null<Window::SessionController*> controller) {
+	auto notLoaded = 0;
+	const auto added = AddToIndex(LoadedItems(history), &notLoaded);
+	auto text = u"Добавлено фото в индекс: "_q + QString::number(added);
+	if (notLoaded > 0) {
+		text += u". Не загружено (пропущено): "_q
+			+ QString::number(notLoaded);
+	}
+	controller->showToast(text);
+}
+
+// ---------------------------------------------------------------------
+// Keyword monitoring.
+
+struct MonitorState {
+	QStringList keywords;
+};
+
+[[nodiscard]] MonitorState &Monitor() {
+	static auto state = MonitorState();
+	return state;
+}
+
+[[nodiscard]] QString KeywordsPath() {
+	return OutputFolder(u"monitor"_q) + u"/keywords.txt"_q;
+}
+
+[[nodiscard]] QString HitsPath() {
+	return OutputFolder(u"monitor"_q) + u"/hits.csv"_q;
+}
+
+[[nodiscard]] QString ReadKeywordsText() {
+	auto f = QFile(KeywordsPath());
+	return f.open(QIODevice::ReadOnly)
+		? QString::fromUtf8(f.readAll())
+		: QString();
+}
+
+void ReloadKeywords() {
+	auto &list = Monitor().keywords;
+	list.clear();
+	for (auto line : ReadKeywordsText().split('\n')) {
+		line = line.trimmed();
+		if (!line.isEmpty() && !line.startsWith('#')) {
+			list.push_back(line.toLower());
+		}
+	}
+}
+
+void LogHit(not_null<HistoryItem*> item, const QString &keyword) {
+	const auto path = HitsPath();
+	const auto exists = QFile::exists(path);
+	auto f = QFile(path);
+	if (!f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+		return;
+	}
+	auto line = QString();
+	if (!exists) {
+		f.write("\xEF\xBB\xBF");
+		line += u"found_at_utc,keyword,chat,message_id,date_utc,link,text\n"_q;
+	}
+	line += CsvField(Utc(TimeId(QDateTime::currentSecsSinceEpoch()))) + ','
+		+ CsvField(keyword) + ','
+		+ CsvField(PeerLine(item->history()->peer)) + ','
+		+ QString::number(item->id.bare) + ','
+		+ CsvField(Utc(item->date())) + ','
+		+ CsvField(MessageLink(item->history()->peer, item->id)) + ','
+		+ CsvField(item->originalText().text.left(500)) + '\n';
+	f.write(line.toUtf8());
+}
+
 } // namespace
 
 std::vector<Indicator> ExtractIndicators(const QString &text) {
@@ -742,6 +1016,66 @@ void AddMessageActions(
 			ShowNotes(history, strong);
 		}
 	}, &st::menuIconEdit);
+
+	auto indicators = ItemIndicators(item);
+	if (!indicators.empty()) {
+		auto search = std::make_unique<Ui::PopupMenu>(menu, menu->st());
+		auto seen = base::flat_set<QString>();
+		for (const auto &indicator : indicators) {
+			if (seen.size() >= 10 || !seen.emplace(indicator.value).second) {
+				continue;
+			}
+			const auto value = indicator.value;
+			search->addAction(value, [=] {
+				if (const auto strong = weak.get()) {
+					strong->searchMessages(value, Dialogs::Key());
+				}
+			});
+		}
+		menu->addAction(
+			u"OSINT: искать во всех чатах"_q,
+			std::move(search),
+			&st::menuIconSearch);
+	}
+
+	if (ItemPhoto(item)) {
+		auto photo = std::make_unique<Ui::PopupMenu>(menu, menu->st());
+		const auto engines = std::vector<std::pair<QString, QString>>{
+			{ u"Яндекс Картинки"_q, u"https://yandex.ru/images/"_q },
+			{ u"Google Картинки"_q, u"https://images.google.com/"_q },
+			{ u"Bing"_q, u"https://www.bing.com/visualsearch"_q },
+			{ u"TinEye"_q, u"https://tineye.com/"_q },
+		};
+		for (const auto &[name, url] : engines) {
+			const auto link = url;
+			photo->addAction(name, [=] {
+				if (const auto strong = weak.get()) {
+					if (const auto found = strong->session().data().message(
+							itemId)) {
+						ReverseSearch(found, strong, link);
+					}
+				}
+			});
+		}
+		photo->addAction(u"Где ещё было это фото"_q, [=] {
+			if (const auto strong = weak.get()) {
+				if (const auto found = strong->session().data().message(
+						itemId)) {
+					ShowSimilarPhotos(found, strong);
+				}
+			}
+		});
+		menu->addAction(
+			u"OSINT: поиск по фото"_q,
+			std::move(photo),
+			&st::menuIconPhoto);
+	}
+
+	menu->addAction(u"OSINT: мониторинг слов"_q, [=] {
+		if (const auto strong = weak.get()) {
+			ShowMonitorSettings(strong);
+		}
+	}, &st::menuIconNotifications);
 }
 
 void ShowMessageReport(
@@ -784,6 +1118,11 @@ void ShowChatAnalysis(
 		{ u"Архив с хешами"_q, [=] {
 			if (const auto strong = weak.get()) {
 				ExportArchive(history, strong);
+			}
+		} },
+		{ u"Индексировать фото"_q, [=] {
+			if (const auto strong = weak.get()) {
+				IndexChatPhotos(history, strong);
 			}
 		} },
 		{ u"Копировать"_q, [=] {
@@ -834,6 +1173,112 @@ void ShowNotes(
 		box->addButton(rpl::single(u"Открыть папку"_q), [=] {
 			save(false);
 			File::ShowInFolder(path);
+		});
+		box->addButton(rpl::single(u"Закрыть"_q), [=] {
+			box->closeBox();
+		});
+	}));
+}
+
+uint64 ImageHash(const QImage &image) {
+	// Difference hash: 9x8 grayscale, compare horizontal neighbours.
+	const auto small = image.convertToFormat(QImage::Format_Grayscale8).scaled(
+		9,
+		8,
+		Qt::IgnoreAspectRatio,
+		Qt::SmoothTransformation);
+	auto result = uint64(0);
+	auto bit = 0;
+	for (auto y = 0; y != 8; ++y) {
+		const auto line = small.constScanLine(y);
+		for (auto x = 0; x != 8; ++x) {
+			if (line[x] > line[x + 1]) {
+				result |= (uint64(1) << bit);
+			}
+			++bit;
+		}
+	}
+	return result;
+}
+
+int HashDistance(uint64 a, uint64 b) {
+	auto value = a ^ b;
+	auto result = 0;
+	while (value) {
+		value &= (value - 1);
+		++result;
+	}
+	return result;
+}
+
+void StartMonitor(not_null<Window::SessionController*> controller) {
+	ReloadKeywords();
+	const auto weak = base::make_weak(controller);
+	controller->session().data().newItemAdded(
+	) | rpl::on_next([=](not_null<HistoryItem*> item) {
+		const auto &keywords = Monitor().keywords;
+		if (keywords.isEmpty() || item->out() || item->isService()) {
+			return;
+		}
+		const auto text = item->originalText().text.toLower();
+		if (text.isEmpty()) {
+			return;
+		}
+		for (const auto &keyword : keywords) {
+			if (text.contains(keyword)) {
+				LogHit(item, keyword);
+				if (const auto strong = weak.get()) {
+					strong->showToast(u"OSINT-мониторинг: «"_q
+						+ keyword
+						+ u"» в "_q
+						+ item->history()->peer->name());
+				}
+				break;
+			}
+		}
+	}, controller->lifetime());
+}
+
+void ShowMonitorSettings(not_null<Window::SessionController*> controller) {
+	const auto current = ReadKeywordsText();
+	const auto weak = base::make_weak(controller);
+	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
+		box->setTitle(rpl::single(u"OSINT: мониторинг слов"_q));
+		box->setWidth(st::boxWideWidth * 3 / 2);
+		box->addRow(object_ptr<Ui::FlatLabel>(
+			box,
+			u"По одному слову, фразе, кошельку или ссылке на строку. "_q
+			u"Когда новое сообщение в любом вашем чате или канале "_q
+			u"содержит одно из них, появится уведомление, а находка "_q
+			u"запишется в Загрузки/OsintGram/monitor/hits.csv. "_q
+			u"Строки, начинающиеся с #, пропускаются."_q,
+			st::boxLabel));
+		const auto field = box->addRow(object_ptr<Ui::InputField>(
+			box,
+			st::editPeerDescription,
+			Ui::InputField::Mode::MultiLine,
+			rpl::single(u"например: airdrop\nTLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7"_q),
+			current));
+		field->setMinHeight(st::boxWideWidth / 2);
+		box->setFocusCallback([=] { field->setFocusFast(); });
+		box->addButton(rpl::single(u"Сохранить"_q), [=] {
+			if (!WriteFile(KeywordsPath(), field->getLastText().toUtf8())) {
+				if (const auto strong = weak.get()) {
+					strong->showToast(u"Не удалось сохранить список"_q);
+				}
+			}
+			ReloadKeywords();
+			box->closeBox();
+		});
+		box->addButton(rpl::single(u"Журнал находок"_q), [=] {
+			if (!QFile::exists(HitsPath())) {
+				(void)WriteFile(
+					HitsPath(),
+					QByteArray("\xEF\xBB\xBF")
+						+ "found_at_utc,keyword,chat,message_id,"
+						"date_utc,link,text\n");
+			}
+			File::ShowInFolder(HitsPath());
 		});
 		box->addButton(rpl::single(u"Закрыть"_q), [=] {
 			box->closeBox();

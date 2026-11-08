@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_session_controller.h"
 
+#include "menu/menu_osint.h"
+
 #include "apiwrap.h"
 #include "api/api_cloud_password.h"
 #include "api/api_text_entities.h"
@@ -1735,6 +1737,9 @@ SessionController::SessionController(
 , _defaultChatTheme(std::make_shared<Ui::ChatTheme>())
 , _chatStyle(std::make_unique<Ui::ChatStyle>(session->colorIndicesValue())) {
 	init();
+	if (_isPrimary) {
+		Osint::StartMonitor(this);
+	}
 
 	// WHY: the window keeps a raw pointer to its root topic or sublist, and
 	// subscribing before its sections lets this close destroy their later

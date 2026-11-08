@@ -49,4 +49,12 @@ void ShowNotes(
 	not_null<History*> history,
 	not_null<Window::SessionController*> controller);
 
+// Keyword monitoring of new messages, started once per session window.
+void StartMonitor(not_null<Window::SessionController*> controller);
+void ShowMonitorSettings(not_null<Window::SessionController*> controller);
+
+// Perceptual (difference) hash of an image, 64 bits.
+[[nodiscard]] uint64 ImageHash(const QImage &image);
+[[nodiscard]] int HashDistance(uint64 a, uint64 b);
+
 } // namespace Osint
