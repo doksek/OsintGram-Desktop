@@ -179,25 +179,6 @@ jobs:
             echo "LTO_FLAG=" >> $GITHUB_ENV
           fi
 
-      - name: Set up DesktopPrivate.
-        shell: bash
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_HASH: ${{ secrets.APP_HASH }}
-        run: |
-          set -e
-          if [ -z "$APP_ID" ] || [ -z "$APP_HASH" ]; then
-            echo "::error::Add APP_ID and APP_HASH secrets: Settings -> Secrets and variables -> Actions."
-            exit 1
-          fi
-          mkdir -p "$TBUILD/DesktopPrivate"
-          printf 'static const int32 ApiId = %s;\nstatic const char *ApiHash = "%s";\n' "$APP_ID" "$APP_HASH" > "$TBUILD/DesktopPrivate/custom_api_id.h"
-          # Packer is not built (autoupdate is off), but its headers must exist.
-          printf 'const char *PrivateKey = "";\nconst char *PrivateBetaKey = "";\n' > "$TBUILD/DesktopPrivate/packer_private.h"
-          printf '[[maybe_unused]] static const char *AlphaPrivateKey = "";\n' > "$TBUILD/DesktopPrivate/alpha_private.h"
-          # Official target: x64 build with the API keys above.
-          echo "$BUILD_TARGET" > "$TBUILD/$REPO_NAME/Telegram/build/target"
-
       - uses: Eden-CI/msvc-dev-cmd@master
         name: Native Tools Command Prompt.
         with:
@@ -379,6 +360,26 @@ jobs:
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
           key: ${{ runner.OS }}-${{ matrix.arch }}-qt-rel-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Set up DesktopPrivate.
+        if: env.ONLY_CACHE == 'false'
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_HASH: ${{ secrets.APP_HASH }}
+        run: |
+          set -e
+          if [ -z "$APP_ID" ] || [ -z "$APP_HASH" ]; then
+            echo "::error::Add APP_ID and APP_HASH secrets: Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          mkdir -p "$TBUILD/DesktopPrivate"
+          printf 'static const int32 ApiId = %s;\nstatic const char *ApiHash = "%s";\n' "$APP_ID" "$APP_HASH" > "$TBUILD/DesktopPrivate/custom_api_id.h"
+          # Packer is not built (autoupdate is off), but its headers must exist.
+          printf 'const char *PrivateKey = "";\nconst char *PrivateBetaKey = "";\n' > "$TBUILD/DesktopPrivate/packer_private.h"
+          printf '[[maybe_unused]] static const char *AlphaPrivateKey = "";\n' > "$TBUILD/DesktopPrivate/alpha_private.h"
+          # Official target: x64 build with the API keys above.
+          echo "$BUILD_TARGET" > "$TBUILD/$REPO_NAME/Telegram/build/target"
 
       - name: Build tree cache.
         if: env.ONLY_CACHE == 'false'
