@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_context_menu.h"
 
 #include "forkgram/uri_menu.h"
+#include "menu/menu_osint.h"
 #include "history/view/history_view_context_menu_fork.h"
 
 #include "api/api_attached_stickers.h"
@@ -1445,6 +1446,9 @@ void AddMessageActions(
 	AddRescheduleAction(menu, request, list);
 	const auto controller = request.navigation->parentController();
 	Fork::AddReplaceMedia(menu, request.item, controller);
+	if (request.item) {
+		Osint::AddMessageActions(menu, request.item, controller);
+	}
 	if (request.selectedItems.size() == 2) {
 		const auto item1 = controller->session().data().message(
 			request.selectedItems[0].msgId);

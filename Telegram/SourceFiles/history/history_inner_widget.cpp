@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/history_inner_widget.h"
 
+#include "menu/menu_osint.h"
+
 #include "ui/widgets/menu/menu_action.h"
 #include "api/api_sending.h"
 #include "forkgram/uri_menu.h"
@@ -4040,6 +4042,10 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 					});
 				});
 		});
+	}
+
+	if (leaderOrSelf && _menu && !_menu->empty()) {
+		Osint::AddMessageActions(_menu.get(), leaderOrSelf, controller);
 	}
 
 	if (leaderOrSelf && !_menu->empty()) {

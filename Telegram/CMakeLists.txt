@@ -1711,6 +1711,8 @@ PRIVATE
     media/system_media_controls_manager.h
     media/system_media_controls_manager.cpp
     menu/menu_antispam_validator.cpp
+    menu/menu_osint.cpp
+    menu/menu_osint.h
     menu/menu_antispam_validator.h
     menu/menu_dock.cpp
     menu/menu_dock.h
